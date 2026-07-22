@@ -101,3 +101,17 @@ class StockPicking(models.Model):
                 )
             res["params"]["anotherAction"] = after_validate_action
         return res
+
+    def _put_in_pack(self, move_line_ids):
+        # Core `_put_in_pack` recomputes the putaway strategy for a single
+        # packed line and rewrites its destination from the move's generic
+        # location. On the barcode screen the operator may have scanned a
+        # specific destination bin onto the line; that choice must win, so we
+        # restore the line destination after the package is created.
+        line_dests = {ml.id: ml.location_dest_id for ml in move_line_ids}
+        package = super()._put_in_pack(move_line_ids)
+        for ml in move_line_ids:
+            dest = line_dests.get(ml.id)
+            if dest and ml.location_dest_id != dest:
+                ml.location_dest_id = dest
+        return package
