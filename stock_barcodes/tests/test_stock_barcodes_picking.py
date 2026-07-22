@@ -267,6 +267,79 @@ class TestStockBarcodesPicking(TestCommonStockBarcodes):
         self.assertEqual(sml.location_dest_id, self.location_2)
         self.assertEqual(sml.qty_picked, 1.0)
 
+    def test_in_scanned_bin_survives_put_in_pack_validation(self):
+        # Reception with auto put-in-pack (as configured in production): the
+        # operator scans a destination bin, which the scan correctly sets on
+        # the move line. But validating auto-packs the picking, and core
+        # `_put_in_pack` recomputes the putaway strategy from the move's
+        # generic destination, silently reverting the scanned bin. The received
+        # product must still land in the scanned bin.
+        group = self.picking_type_in.barcode_option_group_id or self.env.ref(
+            "stock_barcodes.stock_barcodes_option_group_operation"
+        )
+        self.picking_type_in.barcode_option_group_id = group
+        group.auto_put_in_pack = True
+        # Multi-locations makes core `_put_in_pack` derive the pack destination
+        # from the move's generic location (reverting the scanned bin) instead
+        # of keeping the line's own destination.
+        self.env.user.groups_id = [
+            (4, self.env.ref("stock.group_stock_multi_locations").id)
+        ]
+        picking = (
+            self.env["stock.picking"]
+            .with_context(planned_picking=True)
+            .create(
+                {
+                    "location_id": self.supplier_location.id,
+                    "location_dest_id": self.stock_location.id,
+                    "partner_id": self.partner_agrolite.id,
+                    "picking_type_id": self.picking_type_in.id,
+                    "move_ids": [
+                        Command.create(
+                            {
+                                "name": self.product_wo_tracking.name,
+                                "product_id": self.product_wo_tracking.id,
+                                "product_uom_qty": 1,
+                                "product_uom": self.product_wo_tracking.uom_id.id,
+                                "location_id": self.supplier_location.id,
+                                "location_dest_id": self.stock_location.id,
+                            }
+                        )
+                    ],
+                }
+            )
+        )
+        picking.action_confirm()
+        picking.action_assign()
+        action = picking.action_barcode_scan()
+        wiz = self.ScanReadPicking.browse(action["res_id"])
+        # Operator scans a destination bin, then the product.
+        wiz.location_dest_id = self.location_2
+        self.action_barcode_scanned(wiz, self.product_wo_tracking.barcode)
+        sml = picking.move_line_ids
+        # The scan redirect already works (covered by the previous test).
+        self.assertEqual(sml.location_dest_id, self.location_2)
+        # Validate through the barcode flow.
+        picking.with_context(stock_barcodes_validate_picking=True).button_validate()
+        self.assertEqual(picking.state, "done")
+        # The destination scanned on the line must survive validation and the
+        # quant must land there, not be reverted to the generic destination.
+        self.assertEqual(
+            sml.location_dest_id,
+            self.location_2,
+            "the scanned line destination must survive validation",
+        )
+        quant = self.env["stock.quant"].search(
+            [
+                ("product_id", "=", self.product_wo_tracking.id),
+                ("location_id", "=", self.location_2.id),
+                ("quantity", ">", 0),
+            ]
+        )
+        self.assertTrue(
+            quant, "the received product must land in the scanned bin (location_2)"
+        )
+
     def test_guided_lot_name_option_does_not_crash(self):
         # A lot_name option (used to create new serials on reception) must not
         # break guided mode: determine_todo_action fills option fields from the
